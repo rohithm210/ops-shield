@@ -1,0 +1,19 @@
+{
+  "name": "ops-shield",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "setup": "node setup.js",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "express": "^4.21.0",
+    "jsonwebtoken": "^9.0.2",
+    "msnodesqlv8": "^5.6.0",
+    "mssql": "^11.0.1"
+  },
+  "allowScripts": {
+    "msnodesqlv8@5.6.0": true
+  }
+}
