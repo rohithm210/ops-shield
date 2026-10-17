@@ -15,3 +15,6 @@ Multi-company operations dashboard (Node.js, Express, SQL Server).
 ## Notes
 - `start.ps1` and `company_keys.txt` are git-ignored. Do not commit them.
 - Environment variables: `PORT`, `JWT_SECRET`, `ENC_KEY`, `DB_MODE` (`windows` or `sql`), `DB_SERVER`, `DB_NAME`, `DB_USER`, `DB_PASSWORD`.
+
+## Status
+Running locally on Windows with SQL Server.
