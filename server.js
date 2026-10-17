@@ -70,6 +70,32 @@ async function setAccess(targetId, status, approver) {
   return true;
 }
 
+/* ---------- failed-login alerts ---------- */
+const LEVELS = ['yellow', 'orange', 'red'], STEP = { 2: 0, 5: 1, 10: 2 }, LOCK_AT = 10;
+const CHAIN = { Staff: ['Admin', 'Manager', 'CEO'], Admin: ['Manager', 'CEO', 'CEO'], Manager: ['CEO', 'CEO', 'CEO'] };
+const failCount = async id => (await q("SELECT COUNT(*) n FROM FailedLogins WHERE UserId=@u AND At>DATEADD(MINUTE,-30,SYSUTCDATETIME())", { u: id }))[0].n;
+
+async function recordFailure(u, ip) {
+  await q('INSERT INTO FailedLogins(CompanyId,UserId,Ip) VALUES(@c,@u,@ip)', { c: u.CompanyId, u: u.Id, ip: String(ip || '').slice(0, 60) });
+  const n = await failCount(u.Id), step = STEP[n], chain = CHAIN[u.Role];
+  if (step === undefined || !chain) return;
+  if (step === 1) { // orange only if the yellow alert was ignored
+    const ack = await q("SELECT 1 x FROM Alerts WHERE SubjectUserId=@u AND Level='yellow' AND Status='Acknowledged' AND CreatedAt>DATEADD(MINUTE,-30,SYSUTCDATETIME())", { u: u.Id });
+    if (ack.length) return;
+  }
+  const msg = `${u.FullName} (${u.Role}, ${u.Email}) has ${n} failed sign-in attempts.`;
+  await q('INSERT INTO Alerts(CompanyId,SubjectUserId,TargetRole,Level,Attempts,Message) VALUES(@c,@u,@t,@l,@n,@m)',
+    { c: u.CompanyId, u: u.Id, t: chain[step], l: LEVELS[step], n, m: msg });
+  if (step === 2) {
+    const ceos = await q("SELECT Id FROM Users WHERE CompanyId=@c AND Role='CEO'", { c: u.CompanyId });
+    for (const c of ceos) await q("INSERT INTO Emails(CompanyId,FromUserId,ToUserId,Subject,Body,Type) VALUES(@c,@f,@t,@s,@b,'MAIL')",
+      { c: u.CompanyId, f: u.Id, t: c.Id, s: 'SECURITY ALERT: 10 failed sign-ins', b: msg + ' The account is locked for 30 minutes. Open Alerts & Tickets to unlock it.' });
+  }
+}
+
+const hits = {};
+const limited = ip => { const now = Date.now(); hits[ip] = (hits[ip] || []).filter(t => now - t < 36e5); if (hits[ip].length >= 5) return true; hits[ip].push(now); return false; };
+
 /* ---------- public + login ---------- */
 app.get('/api/company/:code', wrap(async (req, res) => {
   const [c] = await q('SELECT Code,Name,Logo FROM Companies WHERE Code=@c', { c: String(req.params.code).toUpperCase() });
@@ -82,7 +108,10 @@ app.post('/api/auth/login', wrap(async (req, res) => {
   if (!code || !email || !secret) return bad(res, 'Company code, email and password are required');
   const [u] = await q('SELECT u.* FROM Users u JOIN Companies c ON c.Id=u.CompanyId WHERE c.Code=@code AND u.Email=@e',
     { code: String(code).toUpperCase(), e: String(email).trim().toLowerCase() });
-  if (!u || !(await bcrypt.compare(String(secret).trim(), u.PasswordHash))) return bad(res, 'Invalid email or password', 401);
+  if (!u) return bad(res, 'Invalid email or password', 401);
+  if (await failCount(u.Id) >= LOCK_AT) return bad(res, 'Too many failed attempts. The account is locked for 30 minutes, or ask your manager/CEO to unlock it.', 423);
+  if (!(await bcrypt.compare(String(secret).trim(), u.PasswordHash))) { await recordFailure(u, req.ip); return bad(res, 'Invalid email or password', 401); }
+  await q('DELETE FROM FailedLogins WHERE UserId=@u', { u: u.Id });
   if (u.MustSetPassword) return res.json({ needsPassword: true, setupToken: jwt.sign({ uid: u.Id, purpose: 'setup' }, cfg.jwtSecret, { expiresIn: '15m' }) });
   res.json({ token: await createSession(u, req.ip) });
 }));
@@ -292,6 +321,53 @@ app.post('/api/help', auth(), only('CEO', 'Manager'), wrap(async (req, res) => {
   if (!s || !m) return bad(res, 'Subject and message are required');
   await q('INSERT INTO HelpRequests(CompanyId,UserId,Subject,Message) VALUES(@c,@u,@s,@m)', { c: req.user.CompanyId, u: req.user.Id, s: s.slice(0, 200), m });
   res.json({ ok: true });
+}));
+
+/* ---------- alerts + tickets ---------- */
+app.post('/api/tickets', wrap(async (req, res) => {
+  const { code, email, type, message } = req.body || {};
+  if (limited(req.ip)) return bad(res, 'Too many requests, try again later', 429);
+  if (!['PASSWORD', 'API_KEY'].includes(type)) return bad(res, 'Choose a ticket type');
+  const [u] = await q('SELECT u.Id,u.CompanyId FROM Users u JOIN Companies c ON c.Id=u.CompanyId WHERE c.Code=@c AND u.Email=@e',
+    { c: String(code || '').toUpperCase(), e: String(email || '').trim().toLowerCase() });
+  if (u) await q('INSERT INTO Tickets(CompanyId,Type,Email,Message) VALUES(@c,@t,@e,@m)',
+    { c: u.CompanyId, t: type, e: String(email).trim().toLowerCase(), m: String(message || '').slice(0, 500) });
+  res.json({ ok: true }); // same answer whether or not the email exists
+}));
+
+app.get('/api/alerts', auth(), only('CEO', 'Manager', 'Admin'), wrap(async (req, res) => {
+  res.json(await q(`SELECT TOP 30 a.Id,a.Level,a.Attempts,a.Message,a.CreatedAt FROM Alerts a
+    WHERE a.CompanyId=@c AND a.TargetRole=@r AND a.Status='Open' ORDER BY a.Id DESC`, { c: req.user.CompanyId, r: req.user.Role }));
+}));
+app.post('/api/alerts/:id/ack', auth(), only('CEO', 'Manager', 'Admin'), wrap(async (req, res) => {
+  await q("UPDATE Alerts SET Status='Acknowledged',AckAt=SYSUTCDATETIME() WHERE Id=@id AND CompanyId=@c AND TargetRole=@r",
+    { id: parseInt(req.params.id), c: req.user.CompanyId, r: req.user.Role });
+  res.json({ ok: true });
+}));
+app.post('/api/alerts/:id/unlock', auth(), only('CEO'), wrap(async (req, res) => {
+  const [a] = await q('SELECT SubjectUserId FROM Alerts WHERE Id=@id AND CompanyId=@c', { id: parseInt(req.params.id), c: req.user.CompanyId });
+  if (!a) return bad(res, 'Alert not found', 404);
+  await q('DELETE FROM FailedLogins WHERE UserId=@u', { u: a.SubjectUserId });
+  await q("UPDATE Alerts SET Status='Acknowledged',AckAt=SYSUTCDATETIME() WHERE Id=@id", { id: parseInt(req.params.id) });
+  res.json({ ok: true });
+}));
+
+app.get('/api/tickets', auth(), only('CEO', 'Manager', 'Admin'), wrap(async (req, res) => {
+  res.json(await q(`SELECT t.Id,t.Email,t.Message,t.CreatedAt,u.FullName,u.Role FROM Tickets t
+    JOIN Users u ON u.CompanyId=t.CompanyId AND u.Email=t.Email
+    WHERE t.CompanyId=@c AND t.Type='PASSWORD' AND t.Status='Open' AND u.Role=@r ORDER BY t.Id DESC`,
+    { c: req.user.CompanyId, r: CHILD[req.user.Role] }));
+}));
+app.post('/api/tickets/:id/resolve', auth(), only('CEO', 'Manager', 'Admin'), wrap(async (req, res) => {
+  const [t] = await q(`SELECT t.Id,u.Id UserId FROM Tickets t JOIN Users u ON u.CompanyId=t.CompanyId AND u.Email=t.Email
+    WHERE t.Id=@id AND t.CompanyId=@c AND t.Type='PASSWORD' AND t.Status='Open' AND u.Role=@r`,
+    { id: parseInt(req.params.id), c: req.user.CompanyId, r: CHILD[req.user.Role] });
+  if (!t) return bad(res, 'Ticket not found', 404);
+  const temp = 'Tmp-' + crypto.randomBytes(5).toString('hex');
+  await q('UPDATE Users SET PasswordHash=@h,PasswordEnc=@e,MustSetPassword=1 WHERE Id=@u', { h: await bcrypt.hash(temp, 10), e: enc(temp), u: t.UserId });
+  await q('DELETE FROM FailedLogins WHERE UserId=@u', { u: t.UserId });
+  await q("UPDATE Tickets SET Status='Resolved',ResolvedBy=@by,ResolvedAt=SYSUTCDATETIME() WHERE Id=@id", { by: req.user.Id, id: t.Id });
+  res.json({ tempPassword: temp });
 }));
 
 /* ---------- background jobs ---------- */

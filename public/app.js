@@ -10,7 +10,7 @@ const CHILD = { CEO: 'Manager', Manager: 'Admin', Admin: 'Staff' };
 const LOGO = '/img/logo.png';
 
 let token = localStorage.getItem('ops_token') || '', me = null, company = null;
-let timer = null, beat = null, badgeT = null, setupToken = null;
+let timer = null, beat = null, badgeT = null, alertT = null, setupToken = null;
 let code = (new URLSearchParams(location.search).get('c') || localStorage.getItem('ops_code') || '').toUpperCase();
 if (code) localStorage.setItem('ops_code', code);
 
@@ -33,8 +33,8 @@ async function api(p, method = 'GET', body) {
   return j;
 }
 
-function stopTimers() { clearInterval(timer); clearInterval(beat); clearInterval(badgeT); }
-function localLogout() { token = ''; localStorage.removeItem('ops_token'); stopTimers(); me = null; showLogin(); }
+function stopTimers() { clearInterval(timer); clearInterval(beat); clearInterval(badgeT); clearInterval(alertT); }
+function localLogout() { token = ''; localStorage.removeItem('ops_token'); stopTimers(); me = null; const a = $('#alerts'); if (a) a.remove(); showLogin(); }
 async function logout() { try { await api('/auth/logout', 'POST'); } catch {} localLogout(); }
 
 /* ================= LOGIN ================= */
@@ -51,7 +51,8 @@ async function showLogin() {
       <label>Password / Company API key</label><input id="lp" type="password" autocomplete="current-password">
       <button class="btn" id="lb">Sign in</button>
     </div>
-    <div class="msg" id="lm"></div></div></div>`;
+    <div class="msg" id="lm"></div>
+    <p><a href="#" id="fg">Forgot password or lost API key?</a></p></div></div>`;
   const go = async () => {
     const cc = (code || ($('#lc') && $('#lc').value) || '').trim().toUpperCase();
     try {
@@ -62,6 +63,7 @@ async function showLogin() {
     } catch (e) { $('#lm').textContent = e.message; }
   };
   $('#lb').onclick = go;
+  $('#fg').onclick = e => { e.preventDefault(); showTicket(); };
   $('#lp').onkeydown = e => { if (e.key === 'Enter') go(); };
 }
 
@@ -77,6 +79,40 @@ function showSetPassword() {
       token = r.token; localStorage.setItem('ops_token', token); boot();
     } catch (e) { $('#lm').textContent = e.message; }
   };
+}
+
+/* ---- forgot password / lost key ticket ---- */
+function showTicket() {
+  $('#lf').innerHTML = `${code ? '' : '<label>Company code</label><input id="tkc">'}
+    <label>Your email</label><input id="tke" type="email">
+    <label>Problem</label><select id="tkt"><option value="PASSWORD">Forgot password</option><option value="API_KEY">Lost company API key</option></select>
+    <label>Message (optional)</label><textarea id="tkm" rows="3"></textarea>
+    <button class="btn" id="tkb">Raise ticket</button> <button class="btn ghost" id="tkx">Back</button>`;
+  $('#tkx').onclick = showLogin;
+  $('#tkb').onclick = async () => {
+    try {
+      await api('/tickets', 'POST', { code: code || $('#tkc').value, email: $('#tke').value, type: $('#tkt').value, message: $('#tkm').value });
+      $('#lf').innerHTML = '<div class="note">Ticket raised. Your admin or CEO will contact you.</div><button class="btn ghost" id="tkx">Back to sign-in</button>';
+      $('#tkx').onclick = showLogin;
+    } catch (e) { $('#lm').textContent = e.message; }
+  };
+}
+
+/* ---- security alert popups ---- */
+const shown = new Set();
+function popup(a) {
+  if (!$('#alerts')) document.body.insertAdjacentHTML('beforeend', '<div id="alerts"></div>');
+  const d = document.createElement('div');
+  d.className = 'alert-pop ' + a.Level;
+  d.innerHTML = `<b>${a.Level === 'red' ? '🚨' : '⚠️'} ${esc(a.Level.toUpperCase())} security alert</b><div>${esc(a.Message)}</div><small>${dt(a.CreatedAt)}</small>
+    <div style="margin-top:8px"><button class="btn sm" data-a>Acknowledge</button> <button class="btn sm ghost" data-x>Dismiss</button></div>`;
+  d.querySelector('[data-a]').onclick = async () => { try { await api('/alerts/' + a.Id + '/ack', 'POST'); d.remove(); } catch (e) { toast(e.message, 1); } };
+  d.querySelector('[data-x]').onclick = () => d.remove();
+  $('#alerts').appendChild(d);
+}
+async function pollAlerts() {
+  if (!me || !['Admin', 'Manager', 'CEO'].includes(me.role)) return;
+  try { (await api('/alerts')).forEach(a => { if (!shown.has(a.Id)) { shown.add(a.Id); popup(a); } }); } catch {}
 }
 
 /* ================= BOOT ================= */
@@ -107,9 +143,9 @@ function showPending() {
 }
 
 const NAV = {
-  CEO: [['dash', '📈 Dashboard'], ['accounts', '💰 Accounts'], ['team', '👔 Managers'], ['mail', '✉️ Mail'], ['tasks', '🗂 Task Overview'], ['servers', '🖥 Servers'], ['company', '🏢 Company'], ['help', '🛟 Help & Contact']],
-  Manager: [['servers', '🖥 Server Health'], ['tasks', '🗂 Admin Work'], ['team', '🛡 Admins'], ['mail', '✉️ Mail'], ['help', '🛟 Help & Contact']],
-  Admin: [['attendance', '🕒 Staff Attendance'], ['team', '🔑 Staff & Passwords'], ['tasks', '🗂 Work Status'], ['mail', '✉️ Mail'], ['servers', '🖥 Servers']],
+  CEO: [['dash', '📈 Dashboard'], ['accounts', '💰 Accounts'], ['team', '👔 Managers'], ['mail', '✉️ Mail'], ['tasks', '🗂 Task Overview'], ['servers', '🖥 Servers'], ['tickets', '🎫 Alerts & Tickets'], ['company', '🏢 Company'], ['help', '🛟 Help & Contact']],
+  Manager: [['servers', '🖥 Server Health'], ['tasks', '🗂 Admin Work'], ['team', '🛡 Admins'], ['mail', '✉️ Mail'], ['tickets', '🎫 Alerts & Tickets'], ['help', '🛟 Help & Contact']],
+  Admin: [['attendance', '🕒 Staff Attendance'], ['team', '🔑 Staff & Passwords'], ['tasks', '🗂 Work Status'], ['mail', '✉️ Mail'], ['servers', '🖥 Servers'], ['tickets', '🎫 Alerts & Tickets']],
   Staff: [['tasks', '🗂 My Work'], ['mail', '✉️ Mail']]
 };
 
@@ -133,6 +169,7 @@ function showApp() {
     } catch {}
   };
   badge(); badgeT = setInterval(badge, 8000);
+  shown.clear(); pollAlerts(); alertT = setInterval(pollAlerts, 8000);
   go(NAV[me.role][0][0]);
 }
 
@@ -404,6 +441,30 @@ views.company = {
     };
   },
   async refresh() {}
+};
+
+/* ---- alerts & tickets ---- */
+views.tickets = {
+  every: 6000,
+  async init() {
+    $('#view').innerHTML = `<div id="tkn"></div><div class="card"><h3>Open security alerts</h3><div id="sal"></div></div>
+      <div class="card"><h3>Password tickets from ${CHILD[me.role]} accounts</h3><div id="tkl"></div></div>`;
+  },
+  async refresh() {
+    const [al, tk] = await Promise.all([api('/alerts'), api('/tickets')]);
+    $('#sal').innerHTML = tbl(['Level', 'Alert', 'Time', 'Action'], al.map(a => [pill(a.Level), esc(a.Message), dt(a.CreatedAt),
+      `<button class="btn sm" data-ack="${a.Id}">Acknowledge</button>` + (me.role === 'CEO' ? ` <button class="btn sm danger" data-unl="${a.Id}">Unlock account</button>` : '')]));
+    $('#tkl').innerHTML = tbl(['Name', 'Email', 'Message', 'Raised', 'Action'], tk.map(t => [esc(t.FullName), esc(t.Email), esc(t.Message || ''), dt(t.CreatedAt),
+      `<button class="btn sm" data-res="${t.Id}">Reset password</button>`]));
+    const act = (sel, path, done) => document.querySelectorAll(sel).forEach(b => b.onclick = async () => {
+      try { const r = await api(path(b), 'POST'); if (done) done(r); toast('Done'); views.tickets.refresh(); } catch (e) { toast(e.message, 1); }
+    });
+    act('[data-ack]', b => `/alerts/${b.dataset.ack}/ack`);
+    act('[data-unl]', b => `/alerts/${b.dataset.unl}/unlock`);
+    act('[data-res]', b => `/tickets/${b.dataset.res}/resolve`, r => {
+      $('#tkn').innerHTML = `<div class="note">Temporary password: <b>${esc(r.tempPassword)}</b><br><small>Give it to the user. They create their own password at next sign-in.</small></div>`;
+    });
+  }
 };
 
 /* ---- help (CEO + Manager) ---- */
