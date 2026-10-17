@@ -1,3 +1,4 @@
 ﻿node_modules/
 company_keys.txt
 .env
+start.ps1
